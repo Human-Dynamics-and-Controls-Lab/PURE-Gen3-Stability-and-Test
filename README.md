@@ -1,167 +1,235 @@
-# Meta Team - Infantry 2021
+# PURE Gen3 Stability and Test
 
-=> 请务必阅读 [Project Wiki](https://github.com/Meta-Team/Meta-Infantry/wiki) :smiley:
+Embedded control firmware for the PURE Gen3 stability mechanism and the
+balancing prototype. The code runs on the RoboMaster Development Board Type C
+and uses ChibiOS/RT with C and C++.
 
-=> Please read [Project Wiki](https://github.com/Meta-Team/Meta-Infantry/wiki) :smiley:
+This repository is a development copy of
+[`tyh4n/Meta-Embedded`](https://github.com/tyh4n/Meta-Embedded), focused on the
+following applications:
 
-ZJU-UIUC Meta 战队 RoboMaster 嵌入式程序工程，基于 ChibiOS 操作系统，使用 C 和 C++。
+| Target | Purpose | Primary hardware interfaces |
+| --- | --- | --- |
+| `STABILITY_SYSTEM` | Four-leg positioning, homing, inverse kinematics, and TI host communication | 8 M2006 motors, CAN1/CAN2, SPI2, Board C user button |
+| `BALANCING_PROTOTYPE` | Single-axis balancing research platform | GM6020 motor, onboard IMU/AHRS, CAN1 |
 
-ZJU-UIUC Meta RoboMaster Team's Embedded Control Program, based on ChibiOS/RT. The program mainly use C and C++.
+The complete Meta-Embedded source tree is retained so the two applications can
+continue to share ChibiOS, CAN, AHRS, shell, and build infrastructure. Other
+vehicle applications are currently out of scope and should remain unchanged
+unless shared infrastructure requires a compatible update.
 
-工程包含步兵、工程、英雄、哨兵机器人源代码，适用于 RM 2018 A 型、RM 2017 开发板，通过条件编译控制编译目标。
+## Applications
 
-The project contains the standard, engineer, hero and sentry vehicles source code and is compatible with RM board 2018 A
-and RM board 2017. With CMake, the code for each robot could be built by switching the target of CMake.
+### Stability System
 
-## macOS arm64 快速开始 | Quick Start on macOS arm64
+`STABILITY_SYSTEM` controls four independent linkage legs. Each leg uses two
+M2006 motors and has an independent Cartesian `(r, h)` position in millimeters.
+The application converts each target through inverse kinematics and commands
+the associated motors through a CAN position loop.
 
-首次配置：
+The configured Cartesian workspace is:
+
+```text
+r: 272.61 to 385.14 mm
+h: 0.00 to 50.00 mm
+```
+
+SPI coordinates use 0.1 mm resolution. The STM32 sends and receives each value
+as the coordinate multiplied by 10.
+
+Homing behavior:
+
+1. After power-up, motors remain inactive and the status LED is red.
+2. Press the Board C user button (`PA0`) once to start the initial homing cycle.
+3. The mechanism drives toward its mechanical limits, detects stall, backs off
+   using the existing position-loop sequence, and establishes the new zero point.
+4. When homing succeeds, the LED turns green and SPI communication becomes ready.
+5. After initialization, a TI `HOME` command runs the same homing cycle. Repeated
+   HOME frames during a cycle do not start additional cycles.
+6. Position targets are rejected while the system is unhomed.
+
+The key implementation is in
+[`main_stability_system.cpp`](dev/application/vehicles/stability_system/main_stability_system.cpp),
+with motor and PID configuration in
+[`can_motor_config.cpp`](dev/application/vehicles/stability_system/can_motor_config.cpp).
+
+### TI to STM32 SPI Protocol
+
+The TI LaunchPad is the SPI master and the STM32 is the SPI slave. The current
+STM32 configuration uses 16-bit transfers, SPI mode 0, and MSB-first word order.
+Both sides must use the same mode, clock polarity/phase, and common ground. The
+intended host update rate is 20 Hz (50 ms per cycle).
+
+Each transfer contains 12 16-bit words:
+
+| Word | Field | Description |
+| ---: | --- | --- |
+| 0 | `magic` | Frame marker, `0xA55A` |
+| 1 | `seq` | Host transaction sequence number |
+| 2 | `command/status` | Command in the high byte, response status in the low byte |
+| 3 | `r1x10` | Leg 1 `r` coordinate multiplied by 10 |
+| 4 | `h1x10` | Leg 1 `h` coordinate multiplied by 10 |
+| 5 | `r2x10` | Leg 2 `r` coordinate multiplied by 10 |
+| 6 | `h2x10` | Leg 2 `h` coordinate multiplied by 10 |
+| 7 | `r3x10` | Leg 3 `r` coordinate multiplied by 10 |
+| 8 | `h3x10` | Leg 3 `h` coordinate multiplied by 10 |
+| 9 | `r4x10` | Leg 4 `r` coordinate multiplied by 10 |
+| 10 | `h4x10` | Leg 4 `h` coordinate multiplied by 10 |
+| 11 | `crc16` | CRC over words 0 through 10 |
+
+The CRC uses initial value `0xFFFF`, polynomial `0xA001`, and processes each
+16-bit word least-significant bit first.
+
+Commands:
+
+| Value | Command | Meaning |
+| ---: | --- | --- |
+| 0 | `NONE` | No operation |
+| 1 | `SET_TARGET` | Set all four independent `r/h` targets |
+| 2 | `QUERY` | Request readiness and current leg positions |
+| 3 | `HOME` | Start one homing cycle |
+
+Response status:
+
+| Value | Status | Meaning |
+| ---: | --- | --- |
+| 0 | `UNHOMED` | Homing has not completed; position targets must not be applied |
+| 1 | `READY` | Position and readiness data are valid; targets may be applied |
+| 2 | `INVALID` | The request failed validation |
+
+TI should send `QUERY` until it observes `READY`, then send `SET_TARGET` at the
+configured rate. If a HOME cycle is requested, the STM32 reports `UNHOMED` while
+the mechanism is moving and returns to `READY` only after all four homing
+threads complete.
+
+### Balancing Prototype
+
+`BALANCING_PROTOTYPE` reads the onboard BMI088/IST8310 attitude estimate and
+controls one GM6020 through direct current commands. The prototype is intended
+for bench testing and controller tuning.
+
+The control loop starts immediately after boot, so the mechanism must be
+supported and the motor direction checked before power is applied. Controller
+gains and startup assumptions are defined in
+[`main_balancing_prototype.cpp`](dev/application/vehicles/balancing_prototype/main_balancing_prototype.cpp);
+the CAN motor profile is in
+[`can_motor_config.cpp`](dev/application/vehicles/balancing_prototype/can_motor_config.cpp).
+
+## Prerequisites
+
+- RoboMaster Development Board Type C
+- ST-Link probe and OpenOCD
+- Arm GNU Toolchain with `arm-none-eabi-gcc`, `arm-none-eabi-g++`, and GDB
+- CMake 3.25 or newer
+- Ninja
+- macOS Apple Silicon for the provided quick-start scripts and presets
+
+The repository also contains ChibiOS, CMSIS, and shared device drivers, so a
+separate ChibiOS installation is not required.
+
+## Quick Start on macOS
+
+Install Homebrew first, then run:
 
 ```bash
 ./scripts/bootstrap-macos.sh
-```
-
-构建并烧录（参数依次为 target、board、build type）：
-
-```bash
-./scripts/build-flash.sh ut_blink 2018a
-./scripts/build-flash.sh STABILITY_SYSTEM 2018a release
-./scripts/build-flash.sh HERO c
-```
-
-只构建、不烧录：
-
-```bash
-./scripts/build-flash.sh --no-flash ut_blink 2018a
-```
-
-检查环境：
-
-```bash
 ./scripts/doctor.sh
 ```
 
-工具链路径由 `ARM_NONE_EABI_TOOLCHAIN_DIR` 显式传入，默认用户目录为
-`$HOME/.local/opt/arm-none-eabi/bin`。不同板型和 build type 使用不同 CMake preset 与构建目录，
-不会互相覆盖：
+The bootstrap script installs the required Homebrew packages, installs or links
+the Arm GNU Toolchain, and checks OpenOCD. The `Brewfile` records the Homebrew
+dependencies.
+
+Build without flashing:
+
+```bash
+./scripts/build-flash.sh --no-flash STABILITY_SYSTEM c release
+./scripts/build-flash.sh --no-flash BALANCING_PROTOTYPE c release
+```
+
+Build and flash with ST-Link:
+
+```bash
+./scripts/build-flash.sh STABILITY_SYSTEM c release
+./scripts/build-flash.sh BALANCING_PROTOTYPE c release
+```
+
+The script arguments are `<target> [board] [debug|release]`. For the focused
+applications, use board `c` and an explicit build type.
+
+Generated ELF files are written to:
 
 ```text
-build/mac-arm64-2018a-debug/
-build/mac-arm64-2018a-release/
-build/mac-arm64-c-debug/
-build/mac-arm64-c-release/
+build/mac-arm64-c-debug/bin/<target>.elf
+build/mac-arm64-c-release/bin/<target>.elf
 ```
 
-CLion 中应使用 `Use Default` Toolchain，并选择对应的 `mac-arm64-*` CMake preset。
-OpenOCD 的全局路径只设置一次：
+## Build and Flash on Other Hosts
+
+Set `ARM_NONE_EABI_TOOLCHAIN_DIR` to the directory containing the Arm toolchain
+executables, then configure the project directly:
+
+```bash
+export ARM_NONE_EABI_TOOLCHAIN_DIR="/path/to/arm-none-eabi/bin"
+
+cmake -S . -B build/board-c-release \
+  -G Ninja \
+  -DBOARD_NAME=rm_board_c \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build/board-c-release --target STABILITY_SYSTEM --parallel
+cmake --build build/board-c-release --target BALANCING_PROTOTYPE --parallel
+```
+
+Flash an ELF manually:
+
+```bash
+openocd -f config/openocd_stm32f4.cfg \
+  -c 'program "build/board-c-release/bin/STABILITY_SYSTEM.elf" verify reset exit'
+```
+
+## CLion
+
+1. Open this repository as a CMake project.
+2. Select the `mac-arm64-c-debug` or `mac-arm64-c-release` preset.
+3. Select `STABILITY_SYSTEM` or `BALANCING_PROTOTYPE` as the run target.
+4. Set the global OpenOCD executable in
+   `Settings -> Build, Execution, Deployment -> Embedded Development`.
+5. Use the CLion flash/debug controls for ST-Link debugging.
+
+The CMake presets keep debug and release artifacts in separate directories.
+
+## Validation Targets
+
+Useful hardware tests include:
+
+```bash
+./scripts/build-flash.sh ut_button c release
+./scripts/build-flash.sh ut_spi c release
+```
+
+`ut_button` starts with a red LED and toggles between red and green on each
+Board C user-button press. `ut_spi` exercises the SPI interface used by the
+stability system.
+
+## Repository Layout
 
 ```text
-Settings → Build, Execution, Deployment → Embedded Development
-OpenOCD location: /opt/homebrew/bin/openocd
+dev/application/vehicles/stability_system/    Stability-system application
+dev/application/vehicles/balancing_prototype/ Balancing-prototype application
+dev/interface/                                CAN, AHRS, SPI, USB, and shell drivers
+dev/scheduler/                                Motor and balancing control scheduling
+dev/board_pin/rm_board_c/                     Board C pin and MCU configuration
+config/                                       Toolchain and OpenOCD configuration
+scripts/                                      Bootstrap, build, flash, and diagnostics
+CMakePresets.json                             macOS build presets
 ```
 
-CLion 的 Run/Flash 按钮仍然可用。它与 `build-flash.sh` 使用相同的 CMake target 和 ELF 输出；
-脚本适合终端与自动化，CLion 适合断点调试和日常编辑。
+## Upstream
 
+This repository is derived from the Meta-Embedded project and its shared
+RoboMaster infrastructure. Preserve the existing upstream notices and review
+the upstream repository for project history and third-party component details:
 
-# 基本结构 | Basic Structures
-
-
-更新日期：Nov.24, 2021
-Updated Time: Nov.24, 2021
-
-```
-Meta-Embedded
-├── cmsis            CMSIS DSP 计算库 | CMSIS DSP Library for Calculation
-├── config           CMake 配置、OpenOCD 配置、辅助脚本等 | Configuration for CMake, OpenOCD and shell scripts.
-├── dev              我们编写的源码文件 | Main source code.
-├── os               ChibiOS/RT 源码文件 | ChibiOS/RT code.
-├── CMakeLists.txt   CMake 主配置文件 | Main configuration file for CMake.
-└── README.md        此文件 | This file.
-```
-
-工程使用类实现封装和模块化，使用线程控制模块间的调用和信息传递。
-
-The project use C++ class for encapsulation and modularization. The modules will be called by threads.
-
-```
-.
-├── board                               - STM32配置 | Configuration for STM32 -
-│   ├── rm_board_2017
-│   │     ├── board.c
-│   │     ├── board.h
-│   │     ├── board.mk
-│   │     └── mcuconf.h
-│   └── rm_board_2018_a
-│         ├── board.c
-│         ├── board.h
-│         ├── board.mk
-│         └── mcuconf.h
-├── interface                           - 较低层次的接口模块 | Low Level Interfaces -
-│   ├── ahrs                            - IMU 模块 | IMU Module -
-│   │   ├── ahrs.cpp                      综合运算模块 | Comprehensive Calculation Module -
-│   │   ├── ahrs.h
-│   │   ├── imu_math.hpp
-│   │   ├── ist8310.cpp                   IST8310 接口 | Interface for IST8310 -
-│   │   ├── ist8310.h
-│   │   ├── ist8310_reg.h
-│   │   ├── mpu6500.cpp                   MPU6500 陀螺仪接口 | Interface for MPU 6500 -
-│   │   ├── mpu6500.h
-│   │   └── mpu6500_reg.h
-│   ├── can                             - CAN总线相关接口 | Interfaces for CAN-BUS -
-│   │   ├── can_interface.cpp             CAN总线收发程序 | CAN-BUS Tx/RX Module
-│   │   ├── can_interface.h
-│   │   ├── can_motor_feedback.cpp        大疆CAN电机接口 | DJI Motors' Feedback Class Using CAN-BUS -
-│   │   ├── can_motor_feedback.h
-│   │   ├── CANMotorIF.cpp       大疆CAN电机整体接口 | Overall Interface for DJI Motors -
-│   │   └── CANMotorIF.h
-│   ├── virtual_COM                     - 虚拟串口 | STM32 Virtual COM port (CDC) -
-│   │   ├── usb_serial_port.cpp                   USB配置文件 | USB configuration file
-│   │   ├── usb_serial_port.h
-│   │   ├── VirtualCOMPort.cpp                       虚拟串口收发接口 | Interface for Virtual COM Port
-│   │   └── VirtualCOMPort.h
-│   └── ...                               其他接口（可能会频繁更新） | Other Interfaces (Varies Over Time)
-├── scheduler                           - 调度程序（包含控制算法） | Schedulers, contains thread performing control algorithms -
-│   ├── buzzer_scheduler.cpp              蜂鸣器 | Buzzer
-│   ├── buzzer_scheduler.h
-│   ├── CANMotorController.cpp           CAN电机调度程序 | Schedulers for CAN motors. Performing control algorithms (like PID)
-│   ├── CANMotorController.h
-│   └── ...                               其他调度程序（近期更新） | Other Schedulers (Might Refactor Soon)
-├── logic                               - 高级逻辑控制 | Higher Level Logic Control -
-│   ├── HapticLG.cpp                  重力模拟器逻辑控制，包含开机校准以及多种模式控制 | Haptic device logic control, contains startup calibration and multiple control modes
-│   ├── HapticLG.h
-│   ├── chassis_logic.cpp                 麦克纳姆轮底盘控制程序，包含速度分解 | Control Algorithm for chassises with Mecanum wheel, including velocity decompose
-│   ├── chassis_logic.h
-│   └── ...                               其他逻辑控制程序（近期更新） | Other high level logical control algorithms (Might Refactor Soon)
-├── common                              - 通用组件 | Universal Components -
-│   ├── common_macro.h
-│   ├── CRC8.cpp
-│   ├── CRC8.h
-│   ├── CRC16.cpp
-│   └── CRC16.h
-├── debug                               - 调试相关代码 | Code for Tests -
-│   ├── shell                             内嵌终端 | Integrated Shell -
-│   │   ├── printf.c
-│   │   ├── printf.h
-│   │   ├── shell.cpp                     Shell 终端接口 | Shell Interface -
-│   │   ├── shell.h
-│   │   ├── shell_base.c
-│   │   ├── shell_base.h
-│   │   ├── shell_base_cmd.c
-│   │   ├── shell_base_cmd.h
-│   │   ├── shell_dbg_cmd.cpp             Shell 通用调试命令 | Universal Shell Commands -
-│   │   ├── shell_dbg_cmd.h
-│   │   └── shellconf.h                   Shell 配置文件 | Shell configuration -
-│   ├── unit_tests                      - 单元测试 | Unit Tests-
-│   └── param_adjusts                   - 参数整调程序 | Parameter Adjust Programs -
-├── module                              - 模块（将来可能与common合并） | common modules (might merge with common soon) -                       
-├── chconf.h                            ChibiOS 配置文件 | ChibiOS configuration
-└── halconf.h                           ChibiOS HAL 配置文件 | ChibiOS HAL configuraion
-```
-
-# 前置阅读资料 | Pre-request
-* 工具链相关资料，参考 [Meta-Infantry Wiki](https://github.com/Meta-Team/Meta-Infantry/wiki)
-* Toolchain, [Meta-Infantry Wiki](https://github.com/Meta-Team/Meta-Infantry/wiki)
-* [CMake 构建系统简介](https://github.com/Meta-Team/Meta-Infantry/wiki/CMake-%E6%9E%84%E5%BB%BA%E7%B3%BB%E7%BB%9F%E7%AE%80%E4%BB%8B)
-* CMake[Brief Introduction to CMake](https://github.com/Meta-Team/Meta-Infantry/wiki/CMake-%E6%9E%84%E5%BB%BA%E7%B3%BB%E7%BB%9F%E7%AE%80%E4%BB%8B)
-* [Meta Team C++ Style Guide](https://github.com/Meta-Team/Meta-Infantry/wiki/Meta-Team-C---Style-Guide)
+- <https://github.com/tyh4n/Meta-Embedded>
+- <https://github.com/Meta-Team/Meta-Embedded>

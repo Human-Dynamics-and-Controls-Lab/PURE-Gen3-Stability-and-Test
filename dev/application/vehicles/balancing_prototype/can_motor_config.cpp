@@ -23,3 +23,15 @@ bool CANMotorCFG::enable_a2v[MOTOR_COUNT] {
 bool CANMotorCFG::enable_v2i[MOTOR_COUNT] {
         false,
 };
+
+bool CANMotorCFG::enable_limits[MOTOR_COUNT] {
+        false,
+};
+
+float CANMotorCFG::min_limit_deg[MOTOR_COUNT] {
+        0.0f,
+};
+
+float CANMotorCFG::max_limit_deg[MOTOR_COUNT] {
+        0.0f,
+};

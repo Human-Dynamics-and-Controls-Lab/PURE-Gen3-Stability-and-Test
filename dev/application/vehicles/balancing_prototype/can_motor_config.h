@@ -25,6 +25,11 @@ public:
     static PIDController::pid_params_t v2iParams [MOTOR_COUNT];
     static bool                        enable_a2v[MOTOR_COUNT];
     static bool                        enable_v2i[MOTOR_COUNT];
+
+    // Software limit parameters
+    static bool  enable_limits[MOTOR_COUNT];
+    static float min_limit_deg[MOTOR_COUNT];
+    static float max_limit_deg[MOTOR_COUNT];
 };
 
 #endif // META_EMBEDDED_CAN_MOTOR_CONFIG_H
